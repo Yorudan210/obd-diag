@@ -1,21 +1,43 @@
 package com.obddiag.app
 
 import android.Manifest
-import android.bluetooth.BluetoothAdapter
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.setContent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -34,54 +56,73 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-enum class Screen { CONNECT, DTC, LIVE }
+enum class MainTab(val title: String) {
+    VEHICLE("Véhicule"),
+    DTC("Défauts"),
+    LIVE("Temps réel"),
+    EXPERT("Expert")
+}
 
 @Composable
 fun AppRoot(viewModel: ObdViewModel) {
-    var screen by remember { mutableStateOf(Screen.CONNECT) }
-    val isConnected by viewModel.isConnected
+    var tab by remember { mutableStateOf(MainTab.VEHICLE) }
+    val connected by viewModel.isConnected
+    val loading by viewModel.isLoading
+    val status by viewModel.statusMessage
 
     Scaffold(
-        topBar = { TopAppBar(title = { Text("OBD Diag") }) },
-        bottomBar = {
-            if (isConnected) {
-                NavigationBar {
-                    NavigationBarItem(
-                        selected = screen == Screen.DTC,
-                        onClick = { screen = Screen.DTC },
-                        icon = {},
-                        label = { Text("Codes défauts") }
-                    )
-                    NavigationBarItem(
-                        selected = screen == Screen.LIVE,
-                        onClick = { screen = Screen.LIVE },
-                        icon = {},
-                        label = { Text("Temps réel") }
-                    )
-                    NavigationBarItem(
-                        selected = false,
-                        onClick = {
+        topBar = {
+            TopAppBar(
+                title = { Text("OBD Diag") },
+                actions = {
+                    if (connected) {
+                        TextButton(onClick = {
                             viewModel.disconnect()
-                            screen = Screen.CONNECT
-                        },
-                        icon = {},
-                        label = { Text("Déconnecter") }
-                    )
+                            tab = MainTab.VEHICLE
+                        }) { Text("Déconnecter") }
+                    }
+                }
+            )
+        },
+        bottomBar = {
+            if (connected) {
+                NavigationBar {
+                    MainTab.values().forEach { t ->
+                        NavigationBarItem(
+                            selected = tab == t,
+                            onClick = { tab = t },
+                            icon = {},
+                            label = { Text(t.title) }
+                        )
+                    }
                 }
             }
         }
     ) { padding ->
-        Box(modifier = Modifier.padding(padding).fillMaxSize()) {
-            when {
-                !isConnected -> ConnectScreen(viewModel)
-                screen == Screen.DTC -> DtcScreen(viewModel)
-                screen == Screen.LIVE -> LiveDataScreen(viewModel)
-                else -> ConnectScreen(viewModel)
+        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+            if (connected) {
+                if (loading) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                Text(
+                    status,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+            }
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                if (!connected) {
+                    ConnectScreen(viewModel)
+                } else when (tab) {
+                    MainTab.VEHICLE -> VehicleScreen(viewModel)
+                    MainTab.DTC -> DtcScreen(viewModel)
+                    MainTab.LIVE -> LiveScreen(viewModel)
+                    MainTab.EXPERT -> ExpertScreen(viewModel)
+                }
             }
         }
     }
 }
 
+@SuppressLint("MissingPermission")
 @Composable
 fun ConnectScreen(viewModel: ObdViewModel) {
     var permissionsGranted by remember { mutableStateOf(false) }
@@ -115,7 +156,8 @@ fun ConnectScreen(viewModel: ObdViewModel) {
         Text("Connexion à l'ELM327", style = MaterialTheme.typography.headlineSmall)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Le boîtier doit déjà être appairé via les réglages Bluetooth d'Android avant de continuer.",
+            "Branchez le boîtier sur la prise OBD, mettez le contact, puis appairez-le au préalable " +
+                "dans les réglages Bluetooth d'Android (code PIN 1234 ou 0000).",
             style = MaterialTheme.typography.bodySmall
         )
         Spacer(Modifier.height(16.dp))
@@ -124,16 +166,15 @@ fun ConnectScreen(viewModel: ObdViewModel) {
 
         if (loading) {
             CircularProgressIndicator()
+            Spacer(Modifier.height(16.dp))
         }
-
-        Spacer(Modifier.height(16.dp))
 
         if (!permissionsGranted) {
             Button(onClick = { permissionLauncher.launch(requiredPermissions) }) {
                 Text("Autoriser le Bluetooth")
             }
         } else {
-            Button(onClick = { devices = viewModel.getPairedDevices() }) {
+            Button(onClick = { devices = viewModel.getPairedDevices() }, enabled = !loading) {
                 Text("Rafraîchir la liste des appareils appairés")
             }
             Spacer(Modifier.height(12.dp))
@@ -142,88 +183,9 @@ fun ConnectScreen(viewModel: ObdViewModel) {
                     ListItem(
                         headlineContent = { Text(device.name ?: "Appareil inconnu") },
                         supportingContent = { Text(device.address) },
-                        modifier = Modifier.clickableRow { viewModel.connect(device) }
+                        modifier = Modifier.clickable(enabled = !loading) { viewModel.connect(device) }
                     )
-                    Divider()
-                }
-            }
-        }
-    }
-}
-
-// Petit helper pour rendre un ListItem cliquable sans dépendance supplémentaire
-@Composable
-fun Modifier.clickableRow(onClick: () -> Unit): Modifier {
-    return this.then(
-        Modifier.clickable(onClick = onClick)
-    )
-}
-
-@Composable
-fun DtcScreen(viewModel: ObdViewModel) {
-    val dtcs by viewModel.dtcList
-    val loading by viewModel.isLoading
-    val status by viewModel.statusMessage
-
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Codes défauts", style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(8.dp))
-        Text(status, style = MaterialTheme.typography.bodySmall)
-        Spacer(Modifier.height(16.dp))
-
-        Row {
-            Button(onClick = { viewModel.readDtcs() }, enabled = !loading) {
-                Text("Lire les codes")
-            }
-            Spacer(Modifier.width(12.dp))
-            OutlinedButton(onClick = { viewModel.clearDtcs() }, enabled = !loading) {
-                Text("Effacer les codes")
-            }
-        }
-
-        if (loading) {
-            Spacer(Modifier.height(16.dp))
-            CircularProgressIndicator()
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        LazyColumn {
-            items(dtcs) { dtc ->
-                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(dtc.code, style = MaterialTheme.typography.titleMedium)
-                        Text(dtc.description, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun LiveDataScreen(viewModel: ObdViewModel) {
-    val values by viewModel.liveValues
-
-    DisposableEffect(Unit) {
-        viewModel.startLiveData()
-        onDispose { viewModel.stopLiveData() }
-    }
-
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        Text("Données temps réel", style = MaterialTheme.typography.headlineSmall)
-        Spacer(Modifier.height(16.dp))
-        LazyColumn {
-            items(values.entries.toList()) { (name, pair) ->
-                val (value, unit) = pair
-                Card(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                    Row(
-                        modifier = Modifier.padding(12.dp).fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(name)
-                        Text("%.1f %s".format(value, unit), style = MaterialTheme.typography.titleMedium)
-                    }
+                    HorizontalDivider()
                 }
             }
         }
