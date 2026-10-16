@@ -211,26 +211,79 @@ object ObdParser {
         return out.map { EcuHit(it.key, it.value) }
     }
 
-    // ---------- Expert : lecture de défauts KWP2000 / UDS (décodage indicatif) ----------
+    // ---------- Modules : UDS (ISO 14229) / KWP2000 ----------
+
+    /** Octet de statut d'un défaut UDS, en clair. */
+    fun udsStatusText(status: Int): String {
+        val parts = mutableListOf<String>()
+        if (status and 0x08 != 0) parts.add("confirmé")
+        if (status and 0x04 != 0) parts.add("en attente")
+        if (status and 0x01 != 0) parts.add("test échoué")
+        if (status and 0x80 != 0) parts.add("voyant demandé")
+        return if (parts.isEmpty()) "inactif (statut %02X)".format(status) else parts.joinToString(", ")
+    }
 
     /** 0x59 0x02 mask (DTC×3 + statut)...  ou  0x58 count (DTC×2 + statut)... */
     fun parseDiagDtcs(messages: List<List<Int>>): List<String> {
         val out = mutableListOf<String>()
         for (m in messages) {
             if (m.size >= 3 && m[0] == 0x59) {
-                val body = m.drop(3)
-                body.chunked(4).filter { it.size == 4 }.forEach {
+                m.drop(3).chunked(4).filter { it.size == 4 }.forEach {
                     if (it[0] == 0 && it[1] == 0 && it[2] == 0) return@forEach
-                    out.add("${dtcFromBytes(it[0], it[1])} (octet bas %02X, statut %02X)".format(it[2], it[3]))
+                    out.add("${dtcFromBytes(it[0], it[1])}-%02X [${udsStatusText(it[3])}]".format(it[2]))
                 }
             } else if (m.size >= 2 && m[0] == 0x58) {
-                val body = m.drop(2)
-                body.chunked(3).filter { it.size == 3 }.forEach {
+                m.drop(2).chunked(3).filter { it.size == 3 }.forEach {
                     if (it[0] == 0 && it[1] == 0) return@forEach
-                    out.add("${dtcFromBytes(it[0], it[1])} (statut %02X)".format(it[2]))
+                    out.add("${dtcFromBytes(it[0], it[1])} [statut %02X]".format(it[2]))
                 }
             }
         }
         return out
+    }
+
+    /** Réponse négative 7F : (service demandé, code de refus), ou null. */
+    fun negativeResponse(messages: List<List<Int>>): Pair<Int, Int>? {
+        for (m in messages) if (m.size >= 3 && m[0] == 0x7F) return m[1] to m[2]
+        return null
+    }
+
+    fun nrcName(code: Int): String = when (code) {
+        0x10 -> "refus général"
+        0x11 -> "service non supporté"
+        0x12 -> "sous-fonction non supportée"
+        0x13 -> "longueur de message incorrecte"
+        0x22 -> "conditions non remplies (contact, moteur, vitesse...)"
+        0x31 -> "valeur hors plage / identifiant inconnu"
+        0x33 -> "accès sécurisé requis"
+        0x35 -> "clé invalide"
+        0x78 -> "réponse en attente"
+        0x7E -> "sous-fonction non supportée dans cette session"
+        0x7F -> "service non supporté dans cette session"
+        else -> "code %02X".format(code)
+    }
+
+    /**
+     * Identifie le module qui a répondu à un TesterPresent (3E 00) sur une ligne
+     * ATH1 : "7E8 02 7E 00" (positif) ou "7E8 03 7F 3E 11" (refus = module présent).
+     */
+    fun moduleResponder(lines: List<String>): String? {
+        for (hit in parseEcuHits(lines)) {
+            val b = hexBytes(hit.payload) ?: continue
+            if (b.size >= 3 && b[1] == 0x7E) return hit.id
+            if (b.size >= 4 && b[1] == 0x7F && b[2] == 0x3E) return hit.id
+        }
+        return null
+    }
+
+    /** Valeur texte d'un identifiant de données (service 22) : "62 F1 90 ...". */
+    fun parseDid(messages: List<List<Int>>, did: Int): String? {
+        for (m in messages) {
+            if (m.size >= 4 && m[0] == 0x62 && m[1] == (did shr 8) && m[2] == (did and 0xFF)) {
+                val s = ascii(m.drop(3).filter { it != 0 }).trim()
+                return s.ifEmpty { null }
+            }
+        }
+        return null
     }
 }

@@ -157,4 +157,45 @@ class ObdParserTest {
     @Test fun ascii() {
         assertNotNull(ObdParser.parseCalIds(msgs("49 04 01 41 42 43 00 00 00 00 00 00 00 00 00 00 00 00 00")))
     }
+
+    @Test fun moduleResponderPositive() {
+        assertEquals("77D", ObdParser.moduleResponder(listOf("77D 02 7E 00")))
+    }
+
+    @Test fun moduleResponderNegativeStillMeansPresent() {
+        assertEquals("7E8", ObdParser.moduleResponder(listOf("7E8 03 7F 3E 11")))
+    }
+
+    @Test fun moduleResponderIgnoresNoData() {
+        assertNull(ObdParser.moduleResponder(listOf("NO DATA")))
+        assertNull(ObdParser.moduleResponder(listOf("7E8 06 41 00 BE 3F A8 13")))
+    }
+
+    @Test fun negativeResponseAndNames() {
+        val m = msgs("7F 19 12\r")
+        assertEquals(0x19 to 0x12, ObdParser.negativeResponse(m))
+        assertTrue(ObdParser.nrcName(0x33).contains("sécurisé"))
+        assertNull(ObdParser.negativeResponse(msgs("59 02 FF\r")))
+    }
+
+    @Test fun udsDtcStatusText() {
+        assertEquals("confirmé, test échoué", ObdParser.udsStatusText(0x09))
+        assertTrue(ObdParser.udsStatusText(0x2F).contains("confirmé"))
+        assertTrue(ObdParser.udsStatusText(0x00).startsWith("inactif"))
+        val r = ObdParser.parseDiagDtcs(listOf(listOf(0x59, 0x02, 0xFF, 0xC1, 0x00, 0x87, 0x08)))
+        assertEquals(listOf("U0100-87 [confirmé]"), r)
+    }
+
+    @Test fun didParsing() {
+        val vin = "VF7XXXXXXXXXXXXXX".map { it.code }
+        val m = listOf(listOf(0x62, 0xF1, 0x90) + vin)
+        assertEquals("VF7XXXXXXXXXXXXXX", ObdParser.parseDid(m, 0xF190))
+        assertNull(ObdParser.parseDid(m, 0xF187))
+        assertNull(ObdParser.parseDid(listOf(listOf(0x7F, 0x22, 0x31)), 0xF190))
+    }
+
+    @Test fun didMultiFrameReassembled() {
+        val m = msgs("014\r0: 62 F1 87 31 32 33\r1: 34 35 36 37 38 39 30\r")
+        assertEquals("1234567890", ObdParser.parseDid(m, 0xF187))
+    }
 }

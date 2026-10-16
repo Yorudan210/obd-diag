@@ -1,5 +1,16 @@
 package com.obddiag.app
 
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
+
+/** Un calculateur trouvé sur le bus CAN : adresse de requête et adresse de réponse. */
+data class ModuleHit(val requestId: String, val responseId: String)
+
+data class ModuleInfoLine(val label: String, val value: String)
+
 data class AdapterInfo(val version: String, val protocol: String, val voltage: String)
 
 data class VehicleInfo(
@@ -198,5 +209,133 @@ class ObdSession(val connection: ObdConnection) {
     suspend fun expert(header: String, rx: String, command: String, timeoutMs: Long = 6000): ElmReply {
         applyHeader(header, rx)
         return connection.send(command.trim(), timeoutMs)
+    }
+
+    // ---------- Modules multi-marque (CAN 11 bits, UDS / KWP2000) ----------
+
+    val isCan: Boolean get() = protocolNumber in setOf("6", "7", "8", "9")
+
+    /** Remet les en-têtes OBD-II par défaut quoi qu'il se soit passé avant. */
+    suspend fun resetHeaders() {
+        connection.send("ATCRA")
+        when (protocolNumber) {
+            "6", "8" -> connection.send("ATSH7DF")
+            "7", "9" -> connection.send("ATSH18DB33F1")
+        }
+        currentHeader = null
+        currentRx = null
+    }
+
+    /**
+     * Envoie un TesterPresent (3E 00) à chaque adresse de [from] à [to] et note
+     * celles qui répondent (réponse positive ou refus : le module est là).
+     * Inoffensif : aucune écriture, aucun changement de session.
+     */
+    suspend fun scanModules(from: Int, to: Int, onProgress: (done: Int, total: Int, id: String) -> Unit): List<ModuleHit> {
+        val hits = mutableListOf<ModuleHit>()
+        val total = to - from + 1
+        connection.send("ATH1")
+        connection.send("ATCRA")
+        connection.send("ATST19") // attente courte (~100 ms) par adresse
+        try {
+            for (id in from..to) {
+                currentCoroutineContext().ensureActive()
+                if (id == 0x7DF) continue
+                val idHex = "%03X".format(id)
+                onProgress(id - from, total, idHex)
+                connection.send("ATSH$idHex")
+                val r = connection.send("3E00", 800)
+                val responder = ObdParser.moduleResponder(r.lines)
+                if (responder != null) hits.add(ModuleHit(idHex, responder))
+            }
+        } finally {
+            withContext(NonCancellable) {
+                connection.send("ATST32")
+                connection.send("ATH0")
+                resetHeaders()
+            }
+        }
+        return hits
+    }
+
+    /** Requête vers un module ; relance quelques fois si le module répond « en attente » (7F xx 78). */
+    private suspend fun moduleRequest(hit: ModuleHit, command: String, retryPending: Boolean = true): ElmReply {
+        applyHeader(hit.requestId, hit.responseId)
+        var reply = connection.send(command, 4000)
+        var tries = 0
+        while (retryPending && tries < 3 && ObdParser.negativeResponse(reply.messages)?.second == 0x78) {
+            delay(700)
+            reply = connection.send(command, 6000)
+            tries++
+        }
+        return reply
+    }
+
+    private fun refusal(reply: ElmReply): String? {
+        val neg = ObdParser.negativeResponse(reply.messages)
+        if (neg != null) return ObdParser.nrcName(neg.second)
+        val err = reply.error
+        return if (err != null) (if (err.contains("NO DATA", true)) "pas de réponse du module" else err) else null
+    }
+
+    /** Lit les défauts d'un module : UDS (19 02 FF) puis, s'il ne comprend pas, KWP2000 (18 02 FF 00). */
+    suspend fun readModuleDtcs(hit: ModuleHit): Result<List<String>> {
+        var r = moduleRequest(hit, "1902FF")
+        var neg = ObdParser.negativeResponse(r.messages)
+        if (neg != null && (neg.second == 0x11 || neg.second == 0x12)) {
+            r = moduleRequest(hit, "1802FF00")
+            neg = ObdParser.negativeResponse(r.messages)
+        }
+        refusal(r)?.let { return Result.failure(Exception(it)) }
+        if (r.messages.none { it.isNotEmpty() && (it[0] == 0x59 || it[0] == 0x58) }) {
+            return Result.failure(Exception("réponse inattendue : ${r.lines.joinToString(" / ").take(80)}"))
+        }
+        return Result.success(ObdParser.parseDiagDtcs(r.messages))
+    }
+
+    /** Efface les défauts d'un module : UDS (14 FF FF FF) puis KWP2000 (14 FF 00). Sans nouvelle tentative. */
+    suspend fun clearModuleDtcs(hit: ModuleHit): Result<Unit> {
+        var r = moduleRequest(hit, "14FFFFFF", retryPending = false)
+        var neg = ObdParser.negativeResponse(r.messages)
+        if (neg != null && (neg.second == 0x11 || neg.second == 0x12 || neg.second == 0x13 || neg.second == 0x31)) {
+            r = moduleRequest(hit, "14FF00", retryPending = false)
+        }
+        refusal(r)?.let { return Result.failure(Exception(it)) }
+        return if (r.messages.any { it.isNotEmpty() && it[0] == 0x54 }) Result.success(Unit)
+        else Result.failure(Exception("effacement non confirmé"))
+    }
+
+    private val standardDids = listOf(
+        0xF190 to "VIN",
+        0xF187 to "Référence pièce",
+        0xF188 to "N° logiciel",
+        0xF189 to "Version logiciel",
+        0xF18A to "Équipementier",
+        0xF18C to "N° de série",
+        0xF191 to "N° matériel",
+        0xF194 to "N° logiciel équipementier",
+        0xF195 to "Version logiciel équipementier",
+        0xF197 to "Nom du système"
+    )
+
+    /** Identification d'un module via les identifiants standard ISO 14229 (22 F1xx). */
+    suspend fun readModuleInfo(hit: ModuleHit): List<ModuleInfoLine> {
+        val out = mutableListOf<ModuleInfoLine>()
+        var unsupported = 0
+        for ((did, label) in standardDids) {
+            val r = moduleRequest(hit, "22%04X".format(did))
+            val v = ObdParser.parseDid(r.messages, did)
+            if (v != null) {
+                out.add(ModuleInfoLine(label, v))
+                unsupported = 0
+            } else if (ObdParser.negativeResponse(r.messages)?.second == 0x11) {
+                out.add(ModuleInfoLine("Identification", "service 22 non supporté par ce module"))
+                break
+            } else if (++unsupported >= 5 && out.isEmpty()) {
+                break
+            }
+        }
+        if (out.isEmpty()) out.add(ModuleInfoLine("Identification", "aucun identifiant standard fourni"))
+        return out
     }
 }

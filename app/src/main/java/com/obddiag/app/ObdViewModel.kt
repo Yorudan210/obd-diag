@@ -6,6 +6,7 @@ import android.bluetooth.BluetoothDevice
 import androidx.compose.runtime.mutableStateOf
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -18,6 +19,7 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     private val connection = ObdConnection()
     private val session = ObdSession(connection)
     private val store = CustomPidStore(app)
+    private val labelStore = ModuleLabelStore(app)
 
     // ---- Connexion ----
     var isConnected = mutableStateOf(false)
@@ -50,7 +52,16 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
     var expertLog = mutableStateOf<List<String>>(emptyList())
     var ecuHits = mutableStateOf<List<EcuHit>>(emptyList())
 
+    // ---- Modules (multi-marque) ----
+    var modules = mutableStateOf<List<ModuleHit>>(emptyList())
+    var moduleLabels = mutableStateOf(labelStore.load())
+    var moduleDtcs = mutableStateOf<Map<String, List<String>>>(emptyMap())
+    var moduleInfo = mutableStateOf<Map<String, List<ModuleInfoLine>>>(emptyMap())
+    var moduleNotes = mutableStateOf<Map<String, String>>(emptyMap())
+    var scanProgress = mutableStateOf("")
+
     private var liveJob: Job? = null
+    private var scanJob: Job? = null
     private val recording = mutableListOf<Pair<Long, Map<String, Double>>>()
     private var recordStart = 0L
 
@@ -114,6 +125,10 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         pendingDtcs.value = emptyList()
         permanentDtcs.value = emptyList()
         freezeFrame.value = null
+        modules.value = emptyList()
+        moduleDtcs.value = emptyMap()
+        moduleInfo.value = emptyMap()
+        moduleNotes.value = emptyMap()
         statusMessage.value = "Déconnecté"
     }
 
@@ -390,6 +405,126 @@ class ObdViewModel(app: Application) : AndroidViewModel(app) {
         ecuHits.value = hits
         log("Scan : ${hits.size} calculateur(s) répondant en OBD-II")
         hits.forEach { log("  ${it.id} : ${it.payload}") }
+    }
+
+
+    // ------------------------------------------------------------------
+    // Modules (multi-marque)
+    // ------------------------------------------------------------------
+
+    fun moduleName(hit: ModuleHit): String = moduleLabels.value[hit.requestId] ?: when (hit.requestId) {
+        "7E0" -> "Moteur (ECM)"
+        "7E1" -> "Boîte de vitesses (TCM)"
+        else -> "Module ${hit.requestId}"
+    }
+
+    fun renameModule(hit: ModuleHit, name: String) {
+        val clean = name.trim()
+        moduleLabels.value = if (clean.isEmpty()) moduleLabels.value - hit.requestId
+        else moduleLabels.value + (hit.requestId to clean)
+        labelStore.save(moduleLabels.value)
+    }
+
+    fun scanModules(from: Int, to: Int) {
+        if (!connection.isConnected || isLoading.value) return
+        if (!session.isCan) {
+            statusMessage.value = "Le scan de modules nécessite un bus CAN (protocole actuel : ${protocol.value.ifEmpty { "inconnu" }})"
+            return
+        }
+        if (from < 0 || to > 0x7FF || to < from || to - from > 0x2FF) {
+            statusMessage.value = "Plage invalide (000 à 7FF, 768 adresses maximum)"
+            return
+        }
+        isLoading.value = true
+        statusMessage.value = "Scan des modules en cours…"
+        scanJob = viewModelScope.launch {
+            try {
+                val hits = session.scanModules(from, to) { done, total, id ->
+                    scanProgress.value = "Adresse $id  (${done * 100 / total} %)"
+                }
+                modules.value = hits
+                moduleDtcs.value = emptyMap()
+                moduleInfo.value = emptyMap()
+                moduleNotes.value = emptyMap()
+                statusMessage.value =
+                    if (hits.isEmpty()) "Aucun module n'a répondu sur cette plage (contact mis ?)"
+                    else "${hits.size} module(s) trouvé(s)"
+            } catch (e: CancellationException) {
+                statusMessage.value = "Scan annulé"
+                throw e
+            } catch (e: Exception) {
+                handleIo(e)
+            } finally {
+                scanProgress.value = ""
+                isLoading.value = false
+            }
+        }
+    }
+
+    fun cancelScan() {
+        scanJob?.cancel()
+    }
+
+    private fun setNote(hit: ModuleHit, text: String?) {
+        moduleNotes.value = if (text == null) moduleNotes.value - hit.requestId
+        else moduleNotes.value + (hit.requestId to text)
+    }
+
+    fun readModuleDtcs(hit: ModuleHit) = op("Lecture des défauts : ${moduleName(hit)}…") {
+        try {
+            val r = session.readModuleDtcs(hit)
+            if (r.isSuccess) {
+                moduleDtcs.value = moduleDtcs.value + (hit.requestId to r.getOrThrow())
+                setNote(hit, null)
+                statusMessage.value = "${moduleName(hit)} : ${r.getOrThrow().size} défaut(s)"
+            } else {
+                setNote(hit, "Lecture des défauts impossible : ${r.exceptionOrNull()?.message}")
+                statusMessage.value = "${moduleName(hit)} : lecture refusée"
+            }
+        } finally {
+            session.restoreHeader()
+        }
+    }
+
+    fun readModuleInfo(hit: ModuleHit) = op("Identification : ${moduleName(hit)}…") {
+        try {
+            moduleInfo.value = moduleInfo.value + (hit.requestId to session.readModuleInfo(hit))
+            statusMessage.value = "${moduleName(hit)} : identification lue"
+        } finally {
+            session.restoreHeader()
+        }
+    }
+
+    fun clearModuleDtcs(hit: ModuleHit) = op("Effacement : ${moduleName(hit)}…") {
+        try {
+            val r = session.clearModuleDtcs(hit)
+            if (r.isSuccess) {
+                moduleDtcs.value = moduleDtcs.value + (hit.requestId to emptyList())
+                setNote(hit, "Défauts effacés. Relisez pour vérifier qu'ils ne reviennent pas.")
+                statusMessage.value = "${moduleName(hit)} : défauts effacés"
+            } else {
+                setNote(hit, "Effacement refusé : ${r.exceptionOrNull()?.message}")
+                statusMessage.value = "${moduleName(hit)} : effacement refusé"
+            }
+        } finally {
+            session.restoreHeader()
+        }
+    }
+
+    fun modulesReport(): String {
+        val sb = StringBuilder("Rapport multi-modules\n")
+        vehicle.value.vin?.let { sb.append("VIN : $it\n") }
+        modules.value.forEach { m ->
+            sb.append("\n${moduleName(m)} (requête ${m.requestId}, réponse ${m.responseId})\n")
+            moduleInfo.value[m.requestId]?.forEach { sb.append("  ${it.label} : ${it.value}\n") }
+            val d = moduleDtcs.value[m.requestId]
+            if (d == null) sb.append("  Défauts : non lus\n")
+            else if (d.isEmpty()) sb.append("  Défauts : aucun\n")
+            else d.forEach { code ->
+                sb.append("  - $code : ${DtcCodes.describe(code.substringBefore('-').substringBefore(' '))}\n")
+            }
+        }
+        return sb.toString()
     }
 
     private fun fmt(v: Double): String = String.format(Locale.FRANCE, "%.1f", v)

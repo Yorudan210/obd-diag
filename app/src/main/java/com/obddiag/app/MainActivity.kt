@@ -60,6 +60,7 @@ enum class MainTab(val title: String) {
     VEHICLE("Véhicule"),
     DTC("Défauts"),
     LIVE("Temps réel"),
+    MODULES("Modules"),
     EXPERT("Expert")
 }
 
@@ -115,6 +116,7 @@ fun AppRoot(viewModel: ObdViewModel) {
                     MainTab.VEHICLE -> VehicleScreen(viewModel)
                     MainTab.DTC -> DtcScreen(viewModel)
                     MainTab.LIVE -> LiveScreen(viewModel)
+                    MainTab.MODULES -> ModulesScreen(viewModel)
                     MainTab.EXPERT -> ExpertScreen(viewModel)
                 }
             }

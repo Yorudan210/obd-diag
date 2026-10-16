@@ -28,6 +28,15 @@ Classic (SPP) à un boîtier **ELM327**.
 - Températures : liquide, air, huile, ambiante
 - Enregistrement des mesures et export CSV
 
+**Modules (multi-marque)**
+- Scan du bus CAN 11 bits : trouve tous les calculateurs qui répondent (moteur, boîte,
+  ABS, airbag, carrosserie... selon le véhicule) sans connaître la marque à l'avance
+- Lecture des défauts de chaque module : UDS (`19 02 FF`), repli automatique en KWP2000 (`18`)
+- Identification via les identifiants standard ISO 14229 (`22 F1xx` : VIN, références
+  pièce/logiciel/matériel, équipementier, série)
+- Effacement des défauts par module (UDS `14`, repli KWP) avec confirmation
+- Noms personnalisables par module, export du rapport complet
+
 **Expert**
 - Console ELM327 : requêtes brutes avec en-tête CAN (ATSH) et filtre (ATCRA)
 - Lecture de défauts KWP2000 (`18 02 FF 00`) et UDS (`19 02 FF`) vers un module choisi
@@ -35,6 +44,15 @@ Classic (SPP) à un boîtier **ELM327**.
 - **PIDs personnalisés** : requête + équation (style Torque), import CSV Torque,
   utilisables dans l'onglet Temps réel
 - Confirmation obligatoire avant toute commande pouvant effacer/écrire/piloter
+
+## Multi-marque : ce qui est (et n'est pas) couvert
+
+L'onglet Modules marche sur tout véhicule dont les calculateurs suivent UDS / KWP2000 sur
+CAN 11 bits, quelle que soit la marque. L'app n'a **pas** de table d'adresses par constructeur
+(non fiable sans documentation) : elle les découvre, et l'utilisateur nomme les modules.
+Non couvert : bus CAN 29 bits par module, K-line multi-modules (véhicules d'avant ~2008),
+bus propriétaires (CCD/SCI Chrysler, J1850 par module), et toutes les fonctions
+d'actionneurs, codage ou adaptation propres à une marque.
 
 ## Limites (à lire)
 
@@ -74,6 +92,8 @@ app/src/main/java/com/obddiag/app/
 ├── VehicleScreen.kt     # Infos véhicule, MIL, moniteurs
 ├── DtcScreen.kt         # Défauts, image figée, effacement, export
 ├── LiveScreen.kt        # Mesures temps réel, enregistrement CSV
+├── ModulesScreen.kt     # Scan multi-marque, défauts/infos par module
+├── ModuleLabelStore.kt  # Noms de modules personnalisés
 ├── ExpertScreen.kt      # Console, protocoles/scan, PIDs perso
 ├── ObdViewModel.kt      # État de l'app et orchestration
 ├── ObdSession.kt        # Logique OBD-II (modes 01/02/03/04/07/09/0A)
